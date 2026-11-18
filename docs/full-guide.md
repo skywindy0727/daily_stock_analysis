@@ -223,6 +223,18 @@ daily_stock_analysis/
 
 默认每个工作日 **18:00（北京时间）** 自动执行。
 
+### 6. （可选）发布报告到 GitHub Pages
+
+默认报告只保存为 30 天的 Artifact。若希望每天的报告长期保留并可在浏览器访问：
+
+1. `Settings` → `Secrets and variables` → `Actions` → `Variables`，新建 Repository variable `PUBLISH_REPORTS_SITE=true`
+2. 等第一次分析成功运行后（会自动创建 `gh-pages` 分支），进入 `Settings` → `Pages`，Source 选 `Deploy from a branch`，分支选 `gh-pages` / `(root)`
+3. 访问 `https://<你的用户名>.github.io/<仓库名>/`
+
+工作流会在分析 job 成功后运行独立的 `publish-site` job：下载本次 Artifact 中的 `reports/*.md`，用 `scripts/publish_reports_site.py` 转成 HTML（`reports/YYYY-MM-DD/*.html`）并重建首页索引，然后提交到 `gh-pages` 分支。往期报告保留在该分支中；只有该 job 拥有 `contents: write` 权限，分析 job 权限不变。非交易日没有报告时会跳过发布。
+
+> ⚠️ 免费账户的 GitHub Pages 是公开的，任何拿到链接的人都能看到你的自选股和 AI 给出的买卖建议。不希望公开时请不要开启。
+
 ---
 
 ## 环境变量完整列表

@@ -563,3 +563,63 @@ jobs:
             echo "📜 最近日志（最后 30 行）:"
             tail -30 logs/stock_analysis_*.log 2>/dev/null || echo "无日志"
           fi
+
+  # 可选：把当天报告发布到 GitHub Pages（gh-pages 分支）。
+  # 仅当 Repository variable PUBLISH_REPORTS_SITE=true 时运行；默认关闭，不影响现有用户。
+  # 独立 job 持有 contents: write，分析 job 的 token 权限保持不变。
+  publish-site:
+    needs: analyze
+    if: vars.PUBLISH_REPORTS_SITE == 'true'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v5
+
+      - name: 设置 Python 环境
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: 安装页面生成依赖
+        run: |
+          grep -E '^markdown2' requirements.txt > publish-requirements.txt
+          pip install -r publish-requirements.txt
+
+      - name: 下载本次分析报告
+        id: download
+        # 非交易日或未生成报告时不会有 artifact，此时跳过发布而不是让整个工作流失败
+        continue-on-error: true
+        uses: actions/download-artifact@v5
+        with:
+          name: analysis-reports-${{ github.run_number }}
+          path: downloaded
+
+      - name: 生成并推送报告站点
+        if: steps.download.outcome == 'success'
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+          if git ls-remote --exit-code --heads origin gh-pages >/dev/null 2>&1; then
+            git fetch --depth=1 origin gh-pages
+            git worktree add --detach site FETCH_HEAD
+          else
+            echo "gh-pages 分支不存在，创建空分支"
+            git worktree add --detach site
+            git -C site checkout --orphan gh-pages
+            git -C site rm -rf --quiet .
+          fi
+
+          python scripts/publish_reports_site.py --reports-dir downloaded/reports --site-dir site
+
+          git -C site add -A
+          if git -C site diff --cached --quiet; then
+            echo "报告站点无变化，跳过提交"
+            exit 0
+          fi
+          git -C site commit -m "reports: publish run ${{ github.run_number }}"
+          git -C site push origin HEAD:gh-pages
+          echo "✅ 已发布到 https://${{ github.repository_owner }}.github.io/${{ github.event.repository.name }}/"

@@ -423,6 +423,7 @@ git push
 - Actions page shows run history
 - Click specific run record to view detailed logs
 - Analysis reports are saved as Artifacts for 30 days
+- To keep them long term and read them online, set the repository variable `PUBLISH_REPORTS_SITE=true` to publish to GitHub Pages; see the [full guide](full-guide_EN.md#6-optional-publish-reports-to-github-pages)
 
 ### Schedule Details
 

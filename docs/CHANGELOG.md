@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 ## [Unreleased]
 
 - [测试] 修复股票名称解析冷启动超时并发测试的同步竞态：在放行后台抓取前确认两个等待者均已结束并返回空结果，避免 Docker 发布门禁偶发失败。
+- [新功能] GitHub Actions 每日工作流新增可选 `publish-site` job：设置 Repository variable `PUBLISH_REPORTS_SITE=true` 后，把当天报告转成 HTML 发布到 `gh-pages` 分支（GitHub Pages），保留往期报告；默认关闭。
 
 <!-- 新条目格式：- [类型] 描述（类型取值：新功能/改进/修复/文档/测试/chore）-->
 <!-- 每条独立一行追加到本段末尾，无需分类标题，合并时冲突最小 -->
