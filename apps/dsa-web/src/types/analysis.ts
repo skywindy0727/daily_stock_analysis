@@ -10,7 +10,7 @@ import type { ResearchArtifact } from './researchArtifact';
 export type StockReportType = 'simple' | 'detailed' | 'full' | 'brief';
 export type ReportType = StockReportType | 'market_review';
 export type AnalysisPhase = 'auto' | 'premarket' | 'intraday' | 'postmarket';
-export type MarketReviewRegion = 'cn' | 'hk' | 'us' | 'jp' | 'kr';
+export type MarketReviewRegion = 'cn' | 'hk' | 'us' | 'jp' | 'kr' | 'tw';
 
 export interface AnalysisRequest {
   stockCode?: string;
@@ -312,6 +312,10 @@ export interface AnalysisContextPackOverviewSubject {
 }
 
 export interface AnalysisContextPackOverviewBlock {
+  /** Recorded context time; may be retrieval time, not market observation time. */
+  timestamp?: string | null;
+  providerTimestamp?: string | null;
+  fetchedAt?: string | null;
   key: string;
   label: string;
   status: AnalysisContextPackBlockStatus;

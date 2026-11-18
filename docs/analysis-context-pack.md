@@ -126,6 +126,8 @@ overview 不输出 `blocks.*.items`、`items.value`、`news.content`、`trend_re
 
 P4 持久化面只在 `analysis_history.context_snapshot` 顶层写入 `analysis_context_pack_overview`。运行态 prompt 字段仍会从 `enhanced_context` 和 history snapshot 中剥离：`market_phase_context`、`analysis_context_pack`、`analysis_context_pack_summary` 不进入公开历史详情或任务状态。`SAVE_CONTEXT_SNAPSHOT=false` 时不持久化整份 `analysis_history.context_snapshot`，因此也不会落库 overview、`market_phase_summary`、`enhanced_context` 或 raw snapshot 字段；旧记录或缺少 overview 的记录继续返回空字段，不影响历史详情读取。
 
+公共 overview block 可追加 `timestamp`、`provider_timestamp`、`fetched_at`：仅透传可解析的 ISO 8601 datetime，保留时区和原始值；不从任意 item 猜测整个 block 的时间，不暴露其他 metadata。`timestamp` 可能来自抓取时间，不能当作观测时间或新鲜度证明；`provider_timestamp` 与 `fetched_at` 分别保留来源观测时间和抓取时间。旧 overview 缺少字段时仍可读取。
+
 公共 API 字段固定为 `report.details.analysis_context_pack_overview`，Web 端经深度 camelCase 后读取 `analysisContextPackOverview`。接线面包括：
 
 - `GET /api/v1/history/{record_id}` 历史详情。
@@ -315,3 +317,7 @@ P0 只记录历史消费面。完整 pack 不应默认公开到历史详情或�
 - pack、日志、历史快照和 API 响应不得记录 API key、token、cookie、完整 webhook URL、邮箱密码、私有环境变量或其他密钥。
 - `source`、`timestamp`、`fallback`、`stale`、`partial` 等质量元数据只用于解释输入限制，不用于阻断分析；除非现有核心路径本来就是 fail-fast。
 - #1386 的盘前 / 盘中 phase 感知是后续 `phase` / `data_quality` 字段的重要背景；P0 只记录关系，不接入 runtime。
+
+## 实时行情与基本面取数复用
+
+普通分析主流程将本轮实时行情传给 `get_fundamental_context(realtime_quote=...)`，A 股及海外估值块直接复用，不再重复取行情、占用基本面与资金流阶段预算。显式传 `None` 表示本轮取数已失败或实时行情已禁用，也不重试；独立调用未传此参数时仍按原有超时和重试策略获取估值行情。资金流缺失时的决策保护规则保持不变，因此修复不保证建议从观望变为买入。
