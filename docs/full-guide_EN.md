@@ -207,6 +207,18 @@ To get started quickly, you need at minimum:
 
 Default schedule: Every weekday at **18:00 (Beijing Time)** automatic execution.
 
+### 6. (Optional) Publish reports to GitHub Pages
+
+By default reports are only kept as a 30-day Artifact. To keep every day's reports and read them in a browser:
+
+1. `Settings` → `Secrets and variables` → `Actions` → `Variables`: add the repository variable `PUBLISH_REPORTS_SITE=true`
+2. After the first successful run (which creates the `gh-pages` branch), open `Settings` → `Pages`, choose `Deploy from a branch`, branch `gh-pages` / `(root)`
+3. Visit `https://<your-username>.github.io/<repo-name>/`
+
+After the analysis job succeeds, a separate `publish-site` job downloads this run's `reports/*.md` from the Artifact, converts them to HTML (`reports/YYYY-MM-DD/*.html`) with `scripts/publish_reports_site.py`, rebuilds the index page and commits to `gh-pages`. Earlier days stay in that branch. Only this job gets `contents: write`; the analysis job's permissions are unchanged. Runs that produce no reports (e.g. non-trading days) skip publishing.
+
+> ⚠️ GitHub Pages on a free account is public: anyone with the link can see your watchlist and the AI's buy/sell calls. Leave this off if that is not acceptable.
+
 ---
 
 ## Complete Environment Variables List

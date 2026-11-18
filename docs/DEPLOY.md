@@ -488,6 +488,7 @@ git push
 - Actions 页面可以看到运行历史
 - 点击具体的运行记录查看详细日志
 - 分析报告会作为 Artifact 保存 30 天
+- 如需长期保存并在线查看，可设置 Repository variable `PUBLISH_REPORTS_SITE=true` 发布到 GitHub Pages，详见 [完整指南](full-guide.md#6可选发布报告到-github-pages)
 
 ### 定时说明
 
