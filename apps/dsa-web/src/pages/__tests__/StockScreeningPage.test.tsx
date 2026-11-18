@@ -1,6 +1,8 @@
-import { act, fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { act, fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { ScreeningHotspotDetail } from '../../api/screening';
+import { UiLanguageProvider } from '../../contexts/UiLanguageContext';
+import { UiLanguageToggle } from '../../components/i18n/UiLanguageToggle';
 import StockScreeningPage from '../StockScreeningPage';
 
 const {
@@ -155,12 +157,26 @@ describe('StockScreeningPage', () => {
     getRun.mockRejectedValue(Object.assign(new Error('run not found'), {
       parsedError: {
         title: '选股任务不可恢复',
+        code: 'screening_screen_task_not_found',
         message: '服务端没有找到这次选股任务，可能后端已重启或任务记录已清理，请重新运行选股。',
         rawMessage: 'screening_screen_task_not_found',
         category: 'http_error',
       },
     }));
     window.sessionStorage.clear();
+  });
+
+  it('updates disabled controls when the UI language changes', async () => {
+    localStorage.setItem('dsa.uiLanguage', 'en');
+    getScreeningStatus.mockResolvedValueOnce({ enabled: false, available: true });
+    render(<UiLanguageProvider><UiLanguageToggle /><StockScreeningPage /></UiLanguageProvider>);
+    expect(await screen.findByRole('button', { name: 'Enable screening' })).toBeEnabled();
+    expect(screen.getByRole('heading', { level: 1 })).toHaveTextContent('Stock Screening');
+    expect(screen.getByRole('button', { name: 'Run screening' })).toBeDisabled();
+    fireEvent.click(screen.getByRole('button', { name: 'Switch UI language' }));
+    expect(screen.getByRole('button', { name: '开启选股' })).toBeEnabled();
+    expect(getScreeningStatus).toHaveBeenCalledTimes(1);
+    localStorage.removeItem('dsa.uiLanguage');
   });
 
   it('keeps implementation attribution and repeated guidance off the operation page', async () => {
@@ -195,10 +211,70 @@ describe('StockScreeningPage', () => {
     fireEvent.click(screen.getByRole('button', { name: '开启选股' }));
 
     await waitFor(() => expect(getScreeningStatus).toHaveBeenCalledTimes(2));
-    expect(screen.getAllByText('选股未开启').length).toBeGreaterThan(0);
+    await waitFor(() => expect(screen.queryByText('选股未开启')).not.toBeInTheDocument());
     expect(screen.getByRole('button', { name: /运行选股/ })).toBeDisabled();
-    expect(screen.getByText('选股功能不可用')).toBeInTheDocument();
+    expect(screen.getAllByText('选股功能不可用').length).toBeGreaterThan(0);
     expect(screen.getByText('选股功能不可用，请检查后端日志')).toBeInTheDocument();
+  });
+
+  it('does not offer activation before the configuration is known', async () => {
+    const status = createDeferred<{ enabled: boolean; available: boolean }>();
+    getScreeningStatus.mockReturnValueOnce(status.promise);
+    render(<StockScreeningPage />);
+
+    expect(screen.getByText('正在检查选股状态')).toBeInTheDocument();
+    expect(screen.queryByText('选股未开启')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '开启选股' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /运行选股/ })).toBeDisabled();
+    expect(getStrategies).not.toHaveBeenCalled();
+    expect(getHotspots).not.toHaveBeenCalled();
+
+    await act(async () => status.resolve({ enabled: false, available: true }));
+    expect(screen.getByRole('button', { name: '开启选股' })).toBeEnabled();
+    expect(enableScreening).not.toHaveBeenCalled();
+  });
+
+  it.each([false, true])('retries unknown status without changing configuration (enabled=%s)', async (enabled) => {
+    const retry = createDeferred<{ enabled: boolean; available: boolean }>();
+    getScreeningStatus.mockRejectedValueOnce(new Error('status unavailable')).mockReturnValueOnce(retry.promise);
+    render(<StockScreeningPage />);
+
+    expect(await screen.findByText('选股状态加载失败')).toBeInTheDocument();
+    expect(screen.getByText('选股状态未知')).toBeInTheDocument();
+    expect(screen.queryByText('选股未开启')).not.toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '开启选股' })).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /运行选股/ })).toBeDisabled();
+    expect(getHistory).not.toHaveBeenCalled();
+    expect(getStrategies).not.toHaveBeenCalled();
+    expect(getHotspots).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole('button', { name: '重试' }));
+    expect(screen.getByText('正在检查选股状态')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '重试' })).not.toBeInTheDocument();
+    await act(async () => retry.resolve({ enabled, available: true }));
+    expect(screen.queryByText('选股状态加载失败')).not.toBeInTheDocument();
+    if (enabled) {
+      expect(screen.getByText('选股已开启')).toBeInTheDocument();
+      await waitFor(() => expect(getStrategies).toHaveBeenCalledTimes(1));
+      expect(getHistory).toHaveBeenCalledTimes(1);
+    } else {
+      expect(screen.getByRole('button', { name: '开启选股' })).toBeEnabled();
+      expect(getStrategies).not.toHaveBeenCalled();
+    }
+    expect(enableScreening).not.toHaveBeenCalled();
+    expect(startScreenTask).not.toHaveBeenCalled();
+  });
+
+  it('keeps status unknown when enabling fails and configuration cannot be re-read', async () => {
+    getScreeningStatus.mockResolvedValueOnce({ enabled: false, available: true })
+      .mockRejectedValueOnce(new Error('status offline'));
+    enableScreening.mockRejectedValueOnce(new Error('enable failed'));
+    render(<StockScreeningPage />);
+    fireEvent.click(await screen.findByRole('button', { name: '开启选股' }));
+    expect(await screen.findByText('选股状态加载失败')).toBeInTheDocument();
+    expect(screen.queryByRole('button', { name: '开启选股' })).not.toBeInTheDocument();
+    expect(screen.queryByText('选股未开启')).not.toBeInTheDocument();
+    expect(screen.getByRole('button', { name: /运行选股/ })).toBeDisabled();
   });
 
   it('loads Screening hotspot themes on demand', async () => {
@@ -1039,7 +1115,6 @@ describe('StockScreeningPage', () => {
       ],
       candidateCount: 1,
     });
-
     render(<StockScreeningPage />);
 
     expect(await screen.findByText('选股已开启')).toBeInTheDocument();
@@ -1201,7 +1276,8 @@ describe('StockScreeningPage', () => {
     expect(window.sessionStorage.getItem('dsa.screening.activeScreenTask.v1')).toContain('screen-task-1');
   });
 
-  it('clears the persisted recovery state when a restored task becomes unrecoverable', async () => {
+  it.each(['zh', 'en'])('clears an expired task and explains how to recover in %s', async (language) => {
+    localStorage.setItem('dsa.uiLanguage', language);
     getScreeningStatus.mockResolvedValue({
       enabled: true,
       available: true,
@@ -1212,22 +1288,18 @@ describe('StockScreeningPage', () => {
       strategy: 'dual_low',
       maxResults: 3,
     }));
-    getScreenTask.mockRejectedValueOnce(Object.assign(new Error('选股任务不可恢复'), {
-      parsedError: {
-        title: '选股任务不可恢复',
-        message: '服务端没有找到这次选股任务，可能后端已重启或任务记录已清理，请重新运行选股。',
-        rawMessage: 'screening_screen_task_not_found',
-        category: 'http_error',
-      },
-    }));
+    getScreenTask.mockRejectedValueOnce({
+      response: { status: 404, data: { detail: { error: 'screening_screen_task_not_found', message: 'Task expired' } } },
+    });
 
-    render(<StockScreeningPage />);
+    render(<UiLanguageProvider><StockScreeningPage /></UiLanguageProvider>);
 
     await waitFor(() => expect(getScreenTask).toHaveBeenCalledTimes(1));
-    expect(screen.getByText(/选股任务不可恢复/)).toBeInTheDocument();
-    expect(screen.queryByText('选股运行中')).not.toBeInTheDocument();
+    expect(await screen.findByText(language === 'zh' ? /选股任务不可恢复/ : /server could not find this task/)).toBeInTheDocument();
+    expect(screen.queryByText(language === 'zh' ? '选股运行中' : 'Screening in progress')).not.toBeInTheDocument();
     // 不可恢复分支必须清理持久化恢复状态，避免刷新后反复恢复同一条失效任务
     expect(window.sessionStorage.getItem('dsa.screening.activeScreenTask.v1')).toBeNull();
+    localStorage.removeItem('dsa.uiLanguage');
   });
 
   it('keeps the persisted recovery state and history visible after filters change', async () => {
@@ -1700,8 +1772,43 @@ describe('StockScreeningPage', () => {
     expect(screen.queryByText(/Missing gemini_api_key/)).not.toBeInTheDocument();
     expect(screen.getByText(/排序：确定性因子/)).toBeInTheDocument();
     expect(screen.getByText('因子排序')).toBeInTheDocument();
-    expect(screen.getByText(/主要优势：流动性 93、估值 87/)).toBeInTheDocument();
+    expect(screen.getByText('本地后置评分: value_quality', { exact: true })).toBeInTheDocument();
+    expect(screen.queryByText(/主要优势：流动性 93、估值 87/)).not.toBeInTheDocument();
     expect(screen.queryByText(/LLM 已降级/)).not.toBeInTheDocument();
+  });
+
+  it('renders an LLM risk summary separately when no LLM reason or thesis is available', async () => {
+    getScreeningStatus.mockResolvedValueOnce({ enabled: true, available: true });
+    screenStocks.mockResolvedValueOnce({
+      enabled: true,
+      candidates: [
+        {
+          rank: 1,
+          code: '000001',
+          name: '平安银行',
+          score: 88.5,
+          reason: '主要优势：估值 88',
+          riskSummary: '资产质量仍需持续观察',
+          riskFlags: [],
+          llmRisks: [],
+          raw: {},
+        },
+      ],
+      candidateCount: 1,
+      llmRanked: true,
+    });
+
+    render(<StockScreeningPage />);
+
+    expect(await screen.findByText('选股已开启')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /运行选股/ }));
+    expect(await screen.findByText('平安银行')).toBeInTheDocument();
+    const expandButton = screen.queryByRole('button', { name: '展开查看' });
+    if (expandButton) fireEvent.click(expandButton);
+
+    expect(screen.getByText('风险摘要')).toBeInTheDocument();
+    expect(screen.getByText('资产质量仍需持续观察')).toBeInTheDocument();
+    expect(screen.getByText('主要优势：估值 88')).toBeInTheDocument();
   });
 
   it('deduplicates Screening snapshot fallback warnings and source errors', async () => {
@@ -1791,6 +1898,15 @@ describe('StockScreeningPage', () => {
           name: '贵州茅台',
           score: 91.2,
           reason: 'Screening pick',
+          whySelected: [
+            { code: 'selection_reason', text: 'Screening pick', source: 'screening', quality: 'observed' },
+            { code: 'top_factors', text: '核心因子：liquidity 92.1、value 87.4', source: 'screening', quality: 'observed' },
+          ],
+          whyNow: [
+            { code: 'news', text: '消息：贵州茅台最新公告', source: '测试源', quality: 'observed' },
+            { code: 'quote_change_pct', text: '涨跌幅：+1.20%', source: 'realtime_quote', quality: 'observed', value: 1.2 },
+          ],
+          explanationQuality: { whySelected: 'ok', whyNow: 'ok' },
           dsaAnalysisSummary: 'DSA行情：现价 1688，涨跌幅 1.2%；DSA新闻：贵州茅台最新公告',
           dsaNews: [{ title: '贵州茅台最新公告', source: '测试源' }],
           dsaContext: {
@@ -1815,6 +1931,13 @@ describe('StockScreeningPage', () => {
 
     expect(await screen.findByText('深度补充：1 / 1')).toBeInTheDocument();
 
+    expect(screen.getByText('为什么入选')).toBeInTheDocument();
+    expect(screen.getByText('核心因子：liquidity 92.1、value 87.4')).toBeInTheDocument();
+    expect(within(screen.getByText('核心因子：liquidity 92.1、value 87.4').closest('li')!).getByText('来源：screening · 质量：observed')).toBeInTheDocument();
+    expect(screen.getByText('为什么现在')).toBeInTheDocument();
+    expect(screen.getByText('消息：贵州茅台最新公告')).toBeInTheDocument();
+    expect(within(screen.getByText('消息：贵州茅台最新公告').closest('li')!).getByText('来源：测试源 · 质量：observed')).toBeInTheDocument();
+    expect(within(screen.getByText('涨跌幅：+1.20%').closest('li')!).getByText('来源：realtime_quote · 质量：observed')).toBeInTheDocument();
     expect(screen.getByText('增强摘要')).toBeInTheDocument();
     expect(screen.getByText(/行情：现价 1688/)).toBeInTheDocument();
     expect(screen.getByText('相关新闻')).toBeInTheDocument();
@@ -2146,5 +2269,105 @@ describe('StockScreeningPage', () => {
     expect(await screen.findByText(/自定义策略 \(capital_heat\) · A 股/)).toBeInTheDocument();
     // 正常恢复成功时不应对占位 taskId 触发轮询回退
     expect(getScreenTask).not.toHaveBeenCalledWith('run-b');
+  });
+
+  it('associates every mixed explanation with its own source and quality', async () => {
+    getScreeningStatus.mockResolvedValue({ enabled: true, available: true });
+    getHistory.mockResolvedValue({ runs: [{ runId: 'mixed', strategy: 'quality_value', market: 'cn', candidateCount: 1 }] });
+    getRun.mockResolvedValue({ enabled: true, runId: 'mixed', strategy: 'quality_value', market: 'cn', result: {
+      enabled: true, candidateCount: 1, candidates: [{ rank: 1, code: '600519', name: '混合证据', reason: '模型理由', raw: {},
+        whySelected: [
+          { code: 'selection_reason', text: '模型理由', source: 'llm', quality: 'inferred' },
+          { code: 'top_factors', text: '加权因子', source: 'screening', quality: 'observed' },
+          { code: 'post_analysis_summary', text: '同文案', source: 'post_analyzer:scorecard', quality: 'observed' },
+          { code: 'post_analysis_summary', text: '同文案', source: 'post_analyzer:external_http', quality: 'inferred' },
+        ], explanationQuality: { whySelected: 'partial' },
+      }],
+    } });
+    render(<StockScreeningPage />);
+    fireEvent.click(await screen.findByText('quality_value'));
+    const selected = (await screen.findByText('为什么入选')).parentElement!;
+    expect(within(selected).getAllByRole('listitem')).toHaveLength(4);
+    const expected = [['模型理由', 'llm', 'inferred'], ['加权因子', 'screening', 'observed'],
+      ['同文案', 'post_analyzer:scorecard', 'observed'], ['同文案', 'post_analyzer:external_http', 'inferred']];
+    for (const [text, source, quality] of expected) {
+      const row = within(selected).getByText(`来源：${source} · 质量：${quality}`).closest('li')!;
+      expect(within(row).getByText(text, { exact: true })).toBeInTheDocument();
+    }
+    expect(within(selected).getByText('综合质量：partial')).toBeInTheDocument();
+  });
+
+  it.each(['history', 'restore', 'post-analysis'])('preserves legacy run summaries with unknown provenance on %s', async (entry) => {
+    getScreeningStatus.mockResolvedValue({ enabled: true, available: true });
+    const summary = { runId: 'legacy-run', strategy: 'quality_value', market: 'cn', candidateCount: 1 };
+    const candidate = {
+      rank: 1, code: '600519', name: '旧版候选', reason: entry === 'post-analysis' ? '' : '旧版保存的估值理由',
+      postAnalysisSummaries: entry === 'post-analysis' ? { scorecard: '旧版保存的估值理由' } : {},
+      factorScores: { topicAlignment: 99 }, changePct: 0, amount: 0,
+      explanationQuality: { whySelected: 'ok' }, raw: {},
+    };
+    const detail = { ...summary, enabled: true, result: { enabled: true, candidates: [candidate], candidateCount: 1 } };
+    getHistory.mockResolvedValue({ enabled: true, runs: [summary], runCount: 1 });
+    getRun.mockResolvedValue(detail);
+    if (entry === 'restore') {
+      window.sessionStorage.setItem('dsa.screening.activeScreenTask.v1', JSON.stringify({
+        taskId: 'legacy-task', runId: summary.runId, strategy: summary.strategy, market: 'cn', maxResults: 3,
+      }));
+    }
+    render(<StockScreeningPage />);
+    if (entry !== 'restore') fireEvent.click(await screen.findByText('quality_value'));
+    expect(await screen.findByText('历史摘要（来源未记录）：旧版保存的估值理由')).toBeInTheDocument();
+    expect(screen.getByText('来源：legacy_result · 质量：unknown')).toBeInTheDocument();
+    expect(screen.queryByText('暂无可验证的入选解释')).not.toBeInTheDocument();
+    expect(screen.getByText('暂无带来源的价格、消息或事件证据')).toBeInTheDocument();
+    expect(screen.queryByText('涨跌幅：+0.00%')).not.toBeInTheDocument();
+    expect(screen.queryByText(/核心因子：/)).not.toBeInTheDocument();
+    expect(candidate).not.toHaveProperty('whySelected');
+  });
+
+  it('shows an unknown why-now explanation instead of treating a placeholder zero as observed', async () => {
+    getScreeningStatus.mockResolvedValueOnce({ enabled: true, available: true });
+    screenStocks.mockResolvedValueOnce({
+      enabled: true,
+      candidates: [
+        {
+          rank: 1,
+          code: '000001',
+          name: '平安银行',
+          score: 80,
+          reason: '本地因子入选',
+          changePct: 0,
+          amount: 0,
+          whySelected: [
+            { code: 'selection_reason', text: '本地因子入选', source: 'screening', quality: 'observed' },
+          ],
+          whyNow: [
+            { code: 'awaiting_evidence', text: '暂无带来源的价格、消息或事件证据', source: 'screening', quality: 'unknown' },
+          ],
+          explanationQuality: { whySelected: 'ok', whyNow: 'unknown' },
+          raw: {},
+        },
+      ],
+      candidateCount: 1,
+    });
+    getScreenTask.mockImplementationOnce(async () => ({
+      taskId: 'screen-task-1',
+      traceId: 'screen-task-1',
+      status: 'completed',
+      progress: 100,
+      message: '任务执行完成',
+      result: await screenStocks.mock.results[0]?.value,
+    }));
+
+    render(<StockScreeningPage />);
+    expect(await screen.findByText('选股已开启')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: /运行选股/ }));
+    expect(await screen.findByText('平安银行')).toBeInTheDocument();
+    const expandButton = screen.queryByRole('button', { name: '展开查看' });
+    if (expandButton) fireEvent.click(expandButton);
+
+    expect(await screen.findByText('暂无带来源的价格、消息或事件证据')).toBeInTheDocument();
+    expect(screen.getByText(/来源：screening · 质量：unknown/)).toBeInTheDocument();
+    expect(screen.queryByText('涨跌幅：+0.00%')).not.toBeInTheDocument();
   });
 });

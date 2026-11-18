@@ -12,10 +12,9 @@ The eval is a *reporter*, not a gate: metric violations lower the report,
 they never fail the process.  Exit codes: 0 = ran (violations included),
 1 = load (golden / tool registry) / build / run failure, 2 = usage error.
 
-The entry supports the single-agent runner only.  When ``AGENT_ARCH=multi``
-the factory returns the orchestrator whose trajectories use per-stage local
-step numbers, which breaks the single-runner metric contract, so the entry
-rejects that arch up front with exit code 1.  Golden samples are validated
+The entry supports both single-agent and multi-agent results.  Multi-agent
+runs retain the existing flattened tool metrics and add a stage-aware report
+section based on explicit orchestrator snapshots.  Golden samples are validated
 against the real tool registry before running, so misspelled or stale
 ``expected_tools`` fail as invalid samples instead of scoring as low hit
 rate.
@@ -32,7 +31,7 @@ import json
 import sys
 from dataclasses import asdict
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Optional
 
 # Add the project root to sys.path so the script also works as
 # `python evals/agent_trajectory/run_eval.py` from anywhere.
@@ -41,8 +40,14 @@ sys.path.insert(0, str(REPO_ROOT))
 
 from evals.agent_trajectory.metrics import (
     GoldenSample,
+    StockScopePolicy,
+    StageTrajectoryMetrics,
     TrajectoryMetrics,
+    compute_stage_trajectory_metrics,
+    compute_stock_scope_metrics,
     compute_trajectory_metrics,
+    format_stage_text_report,
+    format_stock_scope_report,
     format_text_report,
     load_golden_samples,
 )
@@ -59,6 +64,19 @@ def _build_report(sample: GoldenSample, metrics: TrajectoryMetrics) -> Dict[str,
     }
 
 
+def _build_multi_report(
+    sample: GoldenSample,
+    metrics: TrajectoryMetrics,
+    stage_metrics: StageTrajectoryMetrics,
+) -> Dict[str, Any]:
+    """Extend the historical report only when stage snapshots are present."""
+    report = _build_report(sample, metrics)
+    report["run_status"] = "completed"
+    report["stage_metrics"] = asdict(stage_metrics)
+    report["violations"] = list(dict.fromkeys(metrics.violations + stage_metrics.violations))
+    return report
+
+
 def _write_json(path: Optional[Path], payload: Any) -> None:
     """Write ``payload`` as indented UTF-8 JSON (trailing newline)."""
     if path is None:
@@ -69,24 +87,46 @@ def _write_json(path: Optional[Path], payload: Any) -> None:
 _KNOWN_TOOL_NAMES: Optional[set] = None
 
 
-def _check_agent_arch() -> None:
-    """Reject multi-agent arch up front (mirrors the factory's own decision).
+def _stock_scope_policy() -> StockScopePolicy:
+    """Reuse runner classification and normalization, without running tools."""
+    from src.agent.tools.execution import (
+        _default_index_registry_or_none,
+        _is_stock_scoped_tool,
+        _normalize_guard_stock_code,
+    )
+    from src.agent.tools.registry import ToolRegistry
 
-    ``src.agent.factory.build_agent_executor`` returns the orchestrator when
-    ``config.agent_arch == "multi"``; its trajectories concatenate per-stage
-    logs with local step numbering and set ``total_steps`` to the stage count,
-    which the single-runner metric contract cannot interpret.  Fail fast
-    instead of scoring a distorted trajectory.
-    """
+    registry = ToolRegistry()
+    definitions = _tool_definitions()
+    for definition in definitions:
+        registry.register(definition)
+    index_registry = _default_index_registry_or_none()
+    return StockScopePolicy(
+        stock_scoped_tools=frozenset(
+            definition.name for definition in definitions
+            if _is_stock_scoped_tool(registry, definition.name)
+        ),
+        normalize_stock_code=lambda value: _normalize_guard_stock_code(value, index_registry),
+    )
+
+
+def _tool_definitions():
+    """Load the same descriptors used for golden validation and scope checks."""
+    from src.agent.tools.analysis_tools import ALL_ANALYSIS_TOOLS
+    from src.agent.tools.backtest_tools import ALL_BACKTEST_TOOLS
+    from src.agent.tools.data_tools import ALL_DATA_TOOLS
+    from src.agent.tools.market_tools import ALL_MARKET_TOOLS
+    from src.agent.tools.search_tools import ALL_SEARCH_TOOLS
+
+    return ALL_DATA_TOOLS + ALL_ANALYSIS_TOOLS + ALL_SEARCH_TOOLS + ALL_MARKET_TOOLS + ALL_BACKTEST_TOOLS
+
+
+def _check_agent_arch() -> str:
+    """Read the configured architecture without rejecting multi-agent runs."""
     from src.config import get_config
 
     arch = getattr(get_config(), "agent_arch", "single")
-    if arch == "multi":
-        raise RuntimeError(
-            "AGENT_ARCH=multi is not supported by this minimal eval: "
-            "orchestrator trajectories use per-stage local step numbers, "
-            "which break the single-runner metric contract"
-        )
+    return str(arch or "single")
 
 
 def _known_tool_names():
@@ -98,14 +138,7 @@ def _known_tool_names():
     """
     global _KNOWN_TOOL_NAMES
     if _KNOWN_TOOL_NAMES is None:
-        from src.agent.tools.analysis_tools import ALL_ANALYSIS_TOOLS
-        from src.agent.tools.backtest_tools import ALL_BACKTEST_TOOLS
-        from src.agent.tools.data_tools import ALL_DATA_TOOLS
-        from src.agent.tools.market_tools import ALL_MARKET_TOOLS
-        from src.agent.tools.search_tools import ALL_SEARCH_TOOLS
-
-        all_tools = ALL_DATA_TOOLS + ALL_ANALYSIS_TOOLS + ALL_SEARCH_TOOLS + ALL_MARKET_TOOLS + ALL_BACKTEST_TOOLS
-        _KNOWN_TOOL_NAMES = {tool_def.name for tool_def in all_tools}
+        _KNOWN_TOOL_NAMES = {tool_def.name for tool_def in _tool_definitions()}
     return _KNOWN_TOOL_NAMES
 
 
@@ -117,6 +150,46 @@ def _build_executor():
     return build_agent_executor()
 
 
+def _evaluate_sample(executor, sample: GoldenSample):
+    """Run and score a sample, returning the metrics and its report payload."""
+    context: Optional[Dict[str, Any]] = None
+    if sample.stock_code:
+        context = {"stock_code": sample.stock_code}
+    result = executor.run(sample.task_description, context=context)
+    run_failed = getattr(result, "success", None) is False
+    error = getattr(result, "error", None)
+    trajectories = getattr(result, "stage_trajectories", None) or []
+    # Preserve historical behavior for single-agent/legacy results. A failed
+    # Multi-Agent result has an explicit stage trace that must be scored and
+    # written before the CLI returns its non-zero exit status.
+    if run_failed and not trajectories:
+        raise RuntimeError(f"agent run failed (success=false): {error or 'no error detail'}")
+
+    log = getattr(result, "tool_calls_log", None) or []
+    scope_policy = _stock_scope_policy()
+    scope_metrics = compute_stock_scope_metrics(log, sample, scope_policy)
+    stage_metrics = None
+    if trajectories:
+        stage_metrics = compute_stage_trajectory_metrics(trajectories, sample, scope_policy)
+        # The orchestrator's public total_steps retains its historical meaning
+        # (number of stages).  For trajectory scoring, the snapshots carry the
+        # authoritative per-stage loop counts and must be summed once.
+        total_steps = stage_metrics.cumulative_steps
+    else:
+        total_steps = getattr(result, "total_steps", None)
+    metrics = compute_trajectory_metrics(log, sample, total_steps=total_steps)
+    if trajectories:
+        report = _build_multi_report(sample, metrics, stage_metrics)
+        report["stock_scope_metrics"] = scope_metrics
+        if run_failed:
+            report["run_status"] = "failed"
+        run_error = (error or "agent run failed (success=false)") if run_failed else None
+        return metrics, stage_metrics, report, run_error
+    report = _build_report(sample, metrics)
+    report["stock_scope_metrics"] = scope_metrics
+    return metrics, None, report, None
+
+
 def run_sample(executor, sample: GoldenSample, *, json_out: Optional[Path] = None) -> TrajectoryMetrics:
     """Run one golden sample against a duck-typed agent executor and score it.
 
@@ -124,25 +197,20 @@ def run_sample(executor, sample: GoldenSample, *, json_out: Optional[Path] = Non
     ``result`` carries ``tool_calls_log`` (and optionally ``total_steps``) —
     the same shape as ``src.agent.executor.AgentResult``.  The production
     executor is built lazily by :func:`_build_executor`; tests may pass a
-    stub.  A result carrying an explicit ``success=False`` is a run failure
-    (the executor reported a provider / timeout / budget error) and raises
-    ``RuntimeError`` before any scoring; duck-typed results without a
-    ``success`` attribute are treated as successful.  The text summary is
-    always printed to stdout; ``json_out`` additionally writes the
-    structured report for this sample.
+    stub. A result carrying ``success=False`` and no stage snapshots raises as
+    before. When a failed Multi-Agent result includes stage snapshots, this
+    function prints and writes the diagnostic report first, then raises
+    ``RuntimeError`` so the CLI still exits with code 1. Duck-typed results
+    without a ``success`` attribute are treated as successful.
     """
-    context: Optional[Dict[str, Any]] = None
-    if sample.stock_code:
-        context = {"stock_code": sample.stock_code}
-    result = executor.run(sample.task_description, context=context)
-    if getattr(result, "success", None) is False:
-        error = getattr(result, "error", None)
-        raise RuntimeError(f"agent run failed (success=false): {error or 'no error detail'}")
-    log = getattr(result, "tool_calls_log", None) or []
-    total_steps = getattr(result, "total_steps", None)
-    metrics = compute_trajectory_metrics(log, sample, total_steps=total_steps)
+    metrics, stage_metrics, report, run_error = _evaluate_sample(executor, sample)
     print(format_text_report(metrics))
-    _write_json(json_out, _build_report(sample, metrics))
+    print(format_stock_scope_report(report["stock_scope_metrics"]))
+    if stage_metrics is not None:
+        print(format_stage_text_report(stage_metrics))
+    _write_json(json_out, report)
+    if run_error:
+        raise RuntimeError(f"agent run failed (success=false): {run_error}")
     return metrics
 
 
@@ -193,18 +261,30 @@ def main(argv=None) -> int:
         return 1
 
     reports: Dict[str, Dict[str, Any]] = {}
+    failed_multi_run = False
     for sample in samples:
         print(f"[eval] sample: {sample.id} | task: {sample.task_description}")
         try:
-            metrics = run_sample(executor, sample)
+            metrics, stage_metrics, report, run_error = _evaluate_sample(executor, sample)
+            print(format_text_report(metrics))
+            print(format_stock_scope_report(report["stock_scope_metrics"]))
+            if stage_metrics is not None:
+                print(format_stage_text_report(stage_metrics))
         except Exception as exc:
             print(f"error: sample '{sample.id}' failed: {exc}", file=sys.stderr)
             return 1
-        reports[sample.id] = _build_report(sample, metrics)
+        reports[sample.id] = report
+        if run_error:
+            failed_multi_run = True
+            print(
+                f"error: sample '{sample.id}' failed: "
+                f"agent run failed (success=false): {run_error}",
+                file=sys.stderr,
+            )
 
     if args.json_out:
         _write_json(Path(args.json_out), reports if args.all else reports[args.sample])
-    return 0
+    return 1 if failed_multi_run else 0
 
 
 if __name__ == "__main__":

@@ -39,6 +39,66 @@ class _DummyBoardFetcher:
 
 
 class TestFundamentalContext(unittest.TestCase):
+    def test_supplied_quote_is_reused_across_markets(self) -> None:
+        cfg = SimpleNamespace(
+            enable_fundamental_pipeline=True,
+            fundamental_cache_ttl_seconds=0,
+            fundamental_stage_timeout_seconds=1.0,
+            fundamental_fetch_timeout_seconds=1.0,
+            fundamental_retry_max=1,
+        )
+        quote = SimpleNamespace(pe_ratio=12, pb_ratio=0, total_mv=100, circ_mv=80)
+        bundle = {"status": "not_supported", "growth": {}, "earnings": {}}
+        block = {"status": "not_supported", "data": {}, "source_chain": [], "errors": []}
+        for code in ("600519", "AAPL", "HK00700"):
+            for supplied in (quote, None):
+                with self.subTest(code=code, quote=supplied):
+                    manager = DataFetcherManager(fetchers=[])
+                    with patch("src.config.get_config", return_value=cfg), \
+                            patch.object(manager, "get_realtime_quote") as fetch_quote, \
+                            patch.object(manager._fundamental_adapter, "get_fundamental_bundle", return_value=bundle), \
+                            patch.object(manager, "_fetch_offshore_fundamental_bundle",
+                                         return_value=(bundle, None, 0, "yfinance")), \
+                            patch.object(manager, "get_capital_flow_context", return_value=block) as flow, \
+                            patch.object(manager, "get_dragon_tiger_context", return_value=block), \
+                            patch.object(manager, "get_board_context", return_value=block):
+                        ctx = manager.get_fundamental_context(code, realtime_quote=supplied)
+                    fetch_quote.assert_not_called()
+                    self.assertEqual(ctx["valuation"]["data"]["pe_ratio"], 12 if supplied else None)
+                    self.assertEqual(ctx["valuation"]["data"]["pb_ratio"], 0 if supplied else None)
+                    if code == "600519":
+                        self.assertGreater(flow.call_args.kwargs["budget_seconds"], 0)
+
+    def test_slow_duplicate_quote_can_exhaust_budget_but_reuse_preserves_flow(self) -> None:
+        cfg = SimpleNamespace(
+            enable_fundamental_pipeline=True, fundamental_cache_ttl_seconds=0,
+            fundamental_stage_timeout_seconds=1.0, fundamental_fetch_timeout_seconds=1.0,
+            fundamental_retry_max=1,
+        )
+        budgets = []
+        bundle = {"status": "not_supported", "growth": {}, "earnings": {}}
+        block = {"status": "not_supported", "data": {}, "source_chain": [], "errors": []}
+        for reuse in (False, True):
+            manager = DataFetcherManager(fetchers=[])
+            run = manager._run_with_retry
+
+            def timed_run(fn, timeout, label, **kwargs):
+                if label == "fundamental_valuation":
+                    return None, "fundamental_valuation timeout", 1000
+                return run(fn, timeout, label, **kwargs)
+
+            with patch("src.config.get_config", return_value=cfg), \
+                    patch.object(manager, "_run_with_retry", side_effect=timed_run), \
+                    patch.object(manager._fundamental_adapter, "get_fundamental_bundle", return_value=bundle) as fetch_bundle, \
+                    patch.object(manager, "get_capital_flow_context", return_value=block) as flow, \
+                    patch.object(manager, "get_dragon_tiger_context", return_value=block), \
+                    patch.object(manager, "get_board_context", return_value=block):
+                manager.get_fundamental_context("600519", **({"realtime_quote": None} if reuse else {}))
+            budgets.append(flow.call_args.kwargs["budget_seconds"])
+            self.assertEqual(fetch_bundle.call_count, int(reuse))
+        self.assertEqual(budgets[0], 0)
+        self.assertGreater(budgets[1], 0)
+
     def test_not_supported_builder_uses_existing_fundamental_schema(self) -> None:
         manager = DataFetcherManager(fetchers=[])
 
@@ -429,6 +489,45 @@ class TestFundamentalContext(unittest.TestCase):
             unblock.set()
             time.sleep(0.02)
 
+    def test_timeout_pool_rejection_records_elapsed_not_budget(self) -> None:
+        manager = DataFetcherManager(fetchers=[])
+        manager._fundamental_timeout_slots = BoundedSemaphore(1)
+        manager._fundamental_timeout_slots.acquire()
+        with patch("data_provider.base.time.monotonic", side_effect=[10.0, 10.037]):
+            result, error, duration = manager._run_with_timeout(lambda: 1, 20, "busy")
+        self.assertIsNone(result)
+        self.assertIn("worker pool exhausted", error)
+        self.assertEqual(duration, 37)
+
+    def test_timeout_records_measured_wait_and_releases_slot_after_completion(self) -> None:
+        manager = DataFetcherManager(fetchers=[])
+        manager._fundamental_timeout_slots = BoundedSemaphore(1)
+        unblock = Event()
+        finished = Event()
+
+        def task():
+            unblock.wait(timeout=1)
+            finished.set()
+
+        try:
+            with patch("data_provider.base.time.monotonic", side_effect=[10.0, 10.037]):
+                result, error, duration = manager._run_with_timeout(task, 0.001, "blocked")
+            self.assertIsNone(result)
+            self.assertEqual(error, "blocked timeout")
+            self.assertEqual(duration, 37)
+        finally:
+            unblock.set()
+            self.assertTrue(finished.wait(timeout=1))
+
+    def test_completed_tasks_use_monotonic_elapsed(self) -> None:
+        manager = DataFetcherManager(fetchers=[])
+        for task, expected in ((lambda: 7, 7), (lambda: int("invalid"), None)):
+            with patch("data_provider.base.time.monotonic", side_effect=[10.0, 10.037]):
+                result, error, duration = manager._run_with_timeout(task, 20, "completed")
+            self.assertEqual(result, expected)
+            self.assertEqual(duration, 37)
+            self.assertEqual(error is None, expected is not None)
+
     def test_infer_block_status_treats_all_null_payload_as_non_ok(self) -> None:
         self.assertEqual(
             DataFetcherManager._infer_block_status(
@@ -478,6 +577,9 @@ class TestFundamentalContext(unittest.TestCase):
         }
         with patch("src.config.get_config", return_value=cfg), \
                 patch.object(manager, "get_realtime_quote", return_value=quote), \
+                patch.object(manager, "get_capital_flow_context", return_value={"status": "not_supported"}), \
+                patch.object(manager, "get_dragon_tiger_context", return_value={"status": "not_supported"}), \
+                patch.object(manager, "get_board_context", return_value={"status": "not_supported"}), \
                 patch(
                     "data_provider.fundamental_adapter.AkshareFundamentalAdapter.get_fundamental_bundle",
                     return_value=bundle,
