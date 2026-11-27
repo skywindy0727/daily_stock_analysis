@@ -54,6 +54,7 @@ google-search-results>=2.4.0  # SerpAPI
 # Network requests
 requests>=2.31.0            # HTTP requests
 markdown2>=2.4.0            # Markdown to HTML
+opencc>=1.1.9               # 简繁转换（GitHub Pages 报告站点以繁体中文呈现）
 imgkit>=1.2.0              # Markdown to image; requires wkhtmltopdf
 fake-useragent>=1.4.0       # Random User-Agent support
 httpx[socks]                # HTTP client with SOCKS proxy support; optional OpenAI dependency
