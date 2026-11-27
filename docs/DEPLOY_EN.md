@@ -448,14 +448,17 @@ git push
 
 ### Schedule Details
 
-Default configuration: **Monday to Friday, 18:00 Beijing Time** auto-execution
+Default configuration: **8 hours after each US trading day's close** (00:00 New York the next day = Beijing/Taipei 12:00 EDT / 13:00 EST); NYSE holidays are skipped. See the [Full Guide](full-guide_EN.md#scheduled-task-configuration)
 
 Modify time: Edit cron expression in `.github/workflows/00-daily-analysis.yml`:
 
 ```yaml
 schedule:
-  - cron: '0 10 * * 1-5'  # UTC time, +8 = Beijing time
+  - cron: '0 4 * * 2-6'   # EDT: UTC 04:00 = 00:00 New York
+  - cron: '0 5 * * 2-6'   # EST: UTC 05:00 = 00:00 New York
 ```
+
+For another fixed time, also remove the `schedule-gate` job and the `needs`/`if` on `analyze`; single-cron examples:
 
 Common cron examples:
 | Expression | Description |

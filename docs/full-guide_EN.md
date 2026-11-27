@@ -205,7 +205,7 @@ To get started quickly, you need at minimum:
 
 ### 5. Done!
 
-Default schedule: Every weekday at **18:00 (Beijing Time)** automatic execution.
+Default schedule: 8 hours after each US trading day's close (00:00 New York the next day, i.e. Beijing/Taipei 12:00 in daylight time / 13:00 in standard time); NYSE holidays are skipped.
 
 ### 6. (Optional) Publish reports to GitHub Pages
 
@@ -807,9 +807,12 @@ Edit `.github/workflows/00-daily-analysis.yml`:
 
 ```yaml
 schedule:
-  # UTC time, Beijing time = UTC + 8
-  - cron: '0 10 * * 1-5'   # Monday to Friday 18:00 (Beijing Time)
+  # 8 hours after the US close (16:00 New York) = 00:00 New York the next day
+  - cron: '0 4 * * 2-6'    # EDT (daylight time): UTC 04:00 (Beijing/Taipei 12:00)
+  - cron: '0 5 * * 2-6'    # EST (standard time): UTC 05:00 (Beijing/Taipei 13:00)
 ```
+
+Both crons pass through the `schedule-gate` job (`scripts/us_close_schedule_gate.py`): only the one matching New York's current UTC offset runs, and the previous New York calendar day must be an NYSE session (holidays are skipped). The analysis job then runs with `--force-run`, so the app does not treat New York's "today" (e.g. Saturday) as a non-trading day. Manual runs bypass the gate. To go back to a single fixed-time cron, also remove the `schedule-gate` job and the `needs`/`if` on `analyze`.
 
 Common time reference:
 

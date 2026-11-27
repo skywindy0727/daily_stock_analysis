@@ -93,7 +93,8 @@ def test_publish_site_job_is_opt_in_and_scoped():
     job = jobs["publish-site"]
 
     assert job["needs"] == "analyze"
-    assert job["if"] == "vars.PUBLISH_REPORTS_SITE == 'true'"
+    assert "vars.PUBLISH_REPORTS_SITE == 'true'" in job["if"]
+    assert "needs.analyze.result == 'success'" in job["if"]
     assert job["permissions"] == {"contents": "write"}
     # the analysis job must not gain write permissions
     assert "permissions" not in jobs["analyze"]
