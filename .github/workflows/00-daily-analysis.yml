@@ -1,9 +1,13 @@
 name: 每日股票分析
 
 on:
-  # 定时触发 - 每天北京时间 18:00 (UTC 10:00)
+  # 定时触发 - 美股收盘（16:00 纽约时间）后 8 小时 = 纽约时间次日 00:00
+  # GitHub cron 只支持 UTC，两条 cron 分别对应夏令时（EDT, UTC 04:00）与冬令时（EST, UTC 05:00），
+  # 由 schedule-gate job 只放行与当前时差匹配的一条，并跳过 NYSE 休市日（交易日为纽约时间前一天）。
+  # 周二到周六 UTC 触发 = 报告周一到周五的交易日。
   schedule:
-    - cron: '0 10 * * 1-5'     # 周一到周五，UTC 10:00 = 北京时间 18:00
+    - cron: '0 4 * * 2-6'      # EDT：UTC 04:00 = 纽约 00:00 = 台北/北京 12:00
+    - cron: '0 5 * * 2-6'      # EST：UTC 05:00 = 纽约 00:00 = 台北/北京 13:00
   
   # 手动触发
   workflow_dispatch:
@@ -29,7 +33,36 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  # 仅定时触发时运行：判断这次 cron 是否为“美股收盘后 8 小时”且前一天是 NYSE 交易日。
+  schedule-gate:
+    if: github.event_name == 'schedule'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      run: ${{ steps.gate.outputs.run }}
+      session_date: ${{ steps.gate.outputs.session_date }}
+    steps:
+      - name: 检出代码
+        uses: actions/checkout@v5
+
+      - name: 设置 Python 环境
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.11'
+
+      - name: 安装交易日历依赖
+        run: pip install "$(grep -E '^exchange-calendars' requirements.txt | sed 's/[[:space:]]*#.*//')"
+
+      - name: 判断是否运行
+        id: gate
+        env:
+          SCHEDULE: ${{ github.event.schedule }}
+        run: python scripts/us_close_schedule_gate.py
+
   analyze:
+    needs: schedule-gate
+    # 手动触发不经过 gate；定时触发只在 gate 放行时运行。
+    if: ${{ !cancelled() && (github.event_name != 'schedule' || needs.schedule-gate.outputs.run == 'true') }}
     runs-on: ubuntu-latest
     # 兼容误将 STOCK_LIST 配到同名 Environment variables 的场景；
     # 推荐位置仍是 Settings -> Secrets and variables -> Actions -> Repository variables。
@@ -561,6 +594,11 @@ jobs:
           if [ "${{ github.event.inputs.force_run }}" = "true" ]; then
             FORCE_RUN_ARG="--force-run"
             echo "⚡ 已启用强制运行模式（跳过交易日检查）"
+          elif [ "${{ github.event_name }}" = "schedule" ]; then
+            # 定时任务在纽约时间次日 00:00 运行，程序内“今天”已是下一天（如周六），
+            # 交易日已由 schedule-gate 按前一天（${{ needs.schedule-gate.outputs.session_date }}）判断。
+            FORCE_RUN_ARG="--force-run"
+            echo "📅 定时任务：美股交易日 ${{ needs.schedule-gate.outputs.session_date }} 收盘后 8 小时，交易日检查已由 schedule-gate 完成"
           fi
 
           # 执行分析
@@ -606,7 +644,9 @@ jobs:
   # 独立 job 持有 contents: write，分析 job 的 token 权限保持不变。
   publish-site:
     needs: analyze
-    if: vars.PUBLISH_REPORTS_SITE == 'true'
+    # 手动触发时 schedule-gate 为 skipped，隐式 success() 会把它算进来导致本 job 被跳过，
+    # 因此显式只看 analyze 的结果。
+    if: ${{ !cancelled() && needs.analyze.result == 'success' && vars.PUBLISH_REPORTS_SITE == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

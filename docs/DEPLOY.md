@@ -492,14 +492,17 @@ git push
 
 ### 定时说明
 
-默认配置：**周一到周五，北京时间 18:00** 自动执行
+默认配置：**每个美股交易日收盘后 8 小时**（纽约时间次日 00:00 = 北京/台北 12:00 夏令时 / 13:00 冬令时）自动执行，NYSE 休市日跳过，详见 [完整指南](full-guide.md#定时任务配置)
 
 修改时间：编辑 `.github/workflows/00-daily-analysis.yml` 中的 cron 表达式：
 
 ```yaml
 schedule:
-  - cron: '0 10 * * 1-5'  # UTC 时间，+8 = 北京时间
+  - cron: '0 4 * * 2-6'   # EDT：UTC 04:00 = 纽约 00:00
+  - cron: '0 5 * * 2-6'   # EST：UTC 05:00 = 纽约 00:00
 ```
+
+改成其它固定时间时，需同时删除 `schedule-gate` job 及 `analyze` 的 `needs`/`if`，下表为单条 cron 示例：
 
 常用 cron 示例：
 | 表达式 | 说明 |

@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/).
 
 ## [Unreleased]
 
+- [改进] GitHub Actions 每日工作流改为美股收盘后 8 小时运行：两条 UTC cron（04:00 夏令时 / 05:00 冬令时，周二到周六）经新增的 `schedule-gate` job（`scripts/us_close_schedule_gate.py`）只放行与纽约时差匹配的一条，且仅在纽约前一天为 NYSE 交易日时运行；手动触发不受影响。`publish-site` 改为显式依据 `analyze` 结果判断。
 - [新功能] GitHub Actions 每日工作流新增可选 `publish-site` job：设置 Repository variable `PUBLISH_REPORTS_SITE=true` 后，把当天报告转成 HTML 发布到 `gh-pages` 分支（GitHub Pages），保留往期报告；默认关闭。
 - [修复] 选股、告警与个股分析报告统一使用同一 Wilder RSI（`src/utils/rsi.py`，基于 `fin-primitives`，以前 period 个涨跌幅的简单均值起算，与 TA-Lib 一致）：选股不再使用简单滚动均值，告警与报告不再以首行零涨跌幅起算 ewm，短历史下三处的超买/超卖判断不再出现分歧。预热期与无波动时仍为中性值 50；RSI 告警不再用预热占位值判断穿越，最少历史改为 period+2 根。
 - [文档] 将 AlphaSift 与 AlphaEvo 的项目入口前移至 README 产品预览之后、功能特性之前，以 `[!TIP]` 提示框展示，同步简体、英文与繁体版本。
