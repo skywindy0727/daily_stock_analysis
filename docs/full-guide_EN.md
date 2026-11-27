@@ -217,6 +217,8 @@ By default reports are only kept as a 30-day Artifact. To keep every day's repor
 
 After the analysis job succeeds, a separate `publish-site` job downloads this run's `reports/*.md` from the Artifact, converts them to HTML (`reports/YYYY-MM-DD/*.html`) with `scripts/publish_reports_site.py`, rebuilds the index page and commits to `gh-pages`. Earlier days stay in that branch. Only this job gets `contents: write`; the analysis job's permissions are unchanged. Runs that produce no reports (e.g. non-trading days) skip publishing.
 
+Site pages are shown in **Traditional Chinese (Taiwan wording)**: reports are converted with OpenCC (`s2twp`) at publish time and laid out for phone reading (one card per section, single-row tables as label/value grids, wide tables scroll sideways, the daily summary links to each stock's section, dark mode). The original Markdown is kept in `reports/YYYY-MM-DD/*.md`, so every publish re-renders all pages with the current layout; older HTML-only pages are converted once on the next publish.
+
 > ⚠️ GitHub Pages on a free account is public: anyone with the link can see your watchlist and the AI's buy/sell calls. Leave this off if that is not acceptable.
 
 ---

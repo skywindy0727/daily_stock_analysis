@@ -622,7 +622,7 @@ jobs:
 
       - name: 安装页面生成依赖
         run: |
-          grep -E '^markdown2' requirements.txt > publish-requirements.txt
+          grep -E '^(markdown2|opencc)' requirements.txt > publish-requirements.txt
           pip install -r publish-requirements.txt
 
       - name: 下载本次分析报告

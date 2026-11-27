@@ -244,6 +244,8 @@ daily_stock_analysis/
 
 工作流会在分析 job 成功后运行独立的 `publish-site` job：下载本次 Artifact 中的 `reports/*.md`，用 `scripts/publish_reports_site.py` 转成 HTML（`reports/YYYY-MM-DD/*.html`）并重建首页索引，然后提交到 `gh-pages` 分支。往期报告保留在该分支中；只有该 job 拥有 `contents: write` 权限，分析 job 权限不变。非交易日没有报告时会跳过发布。
 
+站点页面统一以**繁体中文（台湾用语）**呈现：发布时用 OpenCC（`s2twp`）把报告转为繁体，并套用适合手机阅读的排版（每段一张卡片、单行表格改为标签/数值网格、宽表格可横向滑动、每日汇总可点击跳到各股票段落、支持深色模式）。原始 Markdown 会一并保存在 `reports/YYYY-MM-DD/*.md`，之后每次发布都会用最新排版重新生成全部页面；更早只有 HTML 的页面会在下一次发布时一次性转换。
+
 > ⚠️ 免费账户的 GitHub Pages 是公开的，任何拿到链接的人都能看到你的自选股和 AI 给出的买卖建议。不希望公开时请不要开启。
 
 ---
